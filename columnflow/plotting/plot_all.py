@@ -190,6 +190,10 @@ def draw_stack(
     h.plot(**defaults)
 
 
+def sqrt_variances(bin_content, w2: np.ndarray, **kwargs) -> tuple[np.ndarray, np.ndarray]:
+    return bin_content - np.sqrt(w2), bin_content + np.sqrt(w2)
+
+
 def draw_hist(
     ax: plt.Axes,
     h: hist.Hist,
@@ -207,6 +211,8 @@ def draw_hist(
         "histtype": "step",
     }
     defaults.update(kwargs)
+    if "yerr" not in defaults and (h.storage_type.accumulator is hist.accumulators.WeightedSum):
+        defaults["yerr"] = h.view().variance**0.5
     h.plot1d(**defaults)
 
 
@@ -362,11 +368,15 @@ def plot_all(
     # prioritize style_config ax settings
     ax_kwargs.update(style_config.get("ax_cfg", {}))
 
+    # # TODO: reput them in again
+    # ax_kwargs.update({"xminorticks": []})
+
     # some settings cannot be handled by ax.set
     xminorticks = ax_kwargs.pop("xminorticks", ax_kwargs.pop("minorxticks", None))
     yminorticks = ax_kwargs.pop("yminorticks", ax_kwargs.pop("minoryticks", None))
     xloc = ax_kwargs.pop("xloc", None)
     yloc = ax_kwargs.pop("yloc", None)
+    x_rotation = ax_kwargs.pop("xtick_rotation", None)
 
     # set all values
     ax.set(**ax_kwargs)
@@ -380,6 +390,12 @@ def plot_all(
         ax.set_xlabel(ax.get_xlabel(), loc=xloc)
     if yloc is not None:
         ax.set_ylabel(ax.get_ylabel(), loc=yloc)
+    if "equal_distant_ticks_label" in kwargs:
+        pos, label = kwargs["equal_distant_ticks_label"]
+        ax.set_xticks(pos)
+        ax.set_xticklabels(np.round(label, 3))
+    if x_rotation:
+        ax.tick_params(axis="x", labelrotation=x_rotation)
 
     # ratio plot
     if not skip_ratio:
@@ -396,6 +412,7 @@ def plot_all(
         # some settings cannot be handled by ax.set
         xloc = rax_kwargs.pop("xloc", None)
         yloc = rax_kwargs.pop("yloc", None)
+        x_rotation = rax_kwargs.pop("xtick_rotation", 0)
 
         # set all values
         rax.set(**rax_kwargs)
@@ -406,6 +423,8 @@ def plot_all(
         if yloc is not None:
             rax.set_ylabel(rax.get_ylabel(), loc=yloc)
 
+        if x_rotation:
+            rax.tick_params(axis="x", labelrotation=x_rotation)
         # remove x-label from main axis
         if "xlabel" in rax_kwargs:
             ax.set_xlabel("")

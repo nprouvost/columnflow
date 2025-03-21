@@ -422,6 +422,7 @@ def prepare_style_config(
     density: bool | None = False,
     shape_norm: bool | None = False,
     yscale: str | None = "",
+    **kwargs: Any,
 ) -> dict:
     """
     small helper function that sets up a default style config based on the instances
@@ -449,6 +450,7 @@ def prepare_style_config(
             "xlabel": variable_inst.get_full_x_title(unit_format=unit_format),
             "yscale": yscale,
             "xscale": "log" if variable_inst.log_x else "linear",
+            "xtick_rotation": kwargs.get("xtick_rotation", None),
         },
         "rax_cfg": {
             "ylabel": "Data / MC",
@@ -863,7 +865,7 @@ def apply_label_placeholders(
         - SHORT: removes everything (and including) the placeholder
         - BREAK: inserts a line break
         - SCALE: inserts a scale factor, passed as "scale" in kwargs; when "scale_format" is given
-                 as well, the scale factor is formatted accordingly
+                as well, the scale factor is formatted accordingly
 
     *apply* and *skip* can be used to de/select certain placeholders.
     """
@@ -906,3 +908,40 @@ def check_nominal_shift(shifts: od.Shift | Sequence[od.Shift] | None) -> None:
     for shift in law.util.make_list(shifts):
         if shift.name == "nominal" and shift.id != 0:
             raise ValueError(f"the nominal shift should have id 0 but found {shift}")
+
+
+def equal_distance_bin_width(histograms: OrderedDict, variable_inst: od.Variable) -> OrderedDict:
+    """Takes an OrderedDict of histograms, and rebins to bins with equal width.
+    The yield is not changed but copied to the rebinned histogram.
+
+    :param histograms: OrderedDict of histograms
+    :param variable_inst: od.Variable instance
+
+    :return: OrderedDict of histograms with equal bin widths, but unchanged yield
+    """
+
+    hists = {}
+    # take first histogram to extract old binning
+    edges = list(histograms.values())[0].axes[variable_inst.name].edges
+    # new bins take lower and upper edge of old bins, and are equally spaced
+    bins = np.linspace(edges[0], edges[-1], len(edges))
+    # TODO: add switch here from variable_inst to choose the ticks of the new bins
+    # default: the xticks are the bin number, recommended is the variable_inst option discrete_x to avoid minor ticks
+    variable_inst_switch = True
+    if variable_inst_switch:
+        x_ticks = [(bins[:-1] + bins[1:]) / 2., range(1, len(bins))]
+    else:
+        x_ticks = [bins, edges]
+
+    for process, h in histograms.items():
+        # create new histogram with equal bin widths
+        label = h.label
+        axes = (
+            [h.axes[axis] for axis in h.axes.name if axis not in variable_inst.name] +
+            [hist.axis.Variable(bins, name=variable_inst.name, label=label)]
+        )
+        new_hist = hist.Hist(*axes, storage=hist.storage.Weight())
+        # copy yield to new histogram and save it
+        np.copyto(dst=new_hist.view(), src=h.view(), casting="same_kind")
+        hists[process] = new_hist
+    return hists, x_ticks
