@@ -926,7 +926,7 @@ def equal_distance_bin_width(histograms: OrderedDict, variable_inst: od.Variable
     # new bins take lower and upper edge of old bins, and are equally spaced
     bins = np.linspace(edges[0], edges[-1], len(edges))
     # TODO: add switch here from variable_inst to choose the ticks of the new bins
-    # default: the xticks are the bin number, recommended is the variable_inst option discrete_x to avoid minor ticks
+    # default: the xticks are the bin number, recommended is to avoid minor ticks
     variable_inst_switch = True
     if variable_inst_switch:
         x_ticks = [(bins[:-1] + bins[1:]) / 2., range(1, len(bins))]
