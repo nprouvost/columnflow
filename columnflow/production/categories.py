@@ -6,7 +6,8 @@ Column production methods related defining categories.
 
 from __future__ import annotations
 
-from collections import defaultdict
+import functools
+import operator
 
 import law
 
@@ -25,7 +26,7 @@ logger = law.logger.get_logger(__name__)
 @producer(
     produces={"category_ids"},
     # custom function to skip categorizers
-    skip_category=(lambda self, task, category_inst: False),
+    skip_category=(lambda self, category_inst: False),
 )
 def category_ids(
     self: Producer,
@@ -36,16 +37,20 @@ def category_ids(
     """
     Assigns each event an array of category ids.
     """
+    # evaluate all unique categorizers, storing their returned masks
+    cat_masks = {}
+    for categorizer in self.unique_categorizers:
+        events, mask = self[categorizer](events, **kwargs)
+        cat_masks[categorizer] = mask
+
+    # loop through categories and construct mask over all categorizers
     category_ids = []
-
     for cat_inst, categorizers in self.categorizer_map.items():
-        # start with a true mask
-        cat_mask = np.ones(len(events), dtype=bool)
-
-        # loop through selectors
-        for categorizer in categorizers:
-            events, mask = self[categorizer](events, **kwargs)
-            cat_mask = cat_mask & mask
+        cat_mask = functools.reduce(
+            operator.and_,
+            (cat_masks[c] for c in categorizers),
+            np.ones(len(events), dtype=bool),
+        )
 
         # covert to nullable array with the category ids or none, then apply ak.singletons
         ids = ak.where(cat_mask, np.float64(cat_inst.id), np.float64(np.nan))
@@ -63,21 +68,18 @@ def category_ids(
 
 
 @category_ids.init
-def category_ids_init(self: Producer) -> None:
-    if not self.inst_dict.get("task"):
-        return
-
+def category_ids_init(self: Producer, **kwargs) -> None:
     # store a mapping from leaf category to categorizer classes for faster lookup
-    self.categorizer_map = defaultdict(list)
+    self.categorizer_map = {}
 
     # add all categorizers obtained from leaf category selection expressions to the used columns
     for cat_inst in self.config_inst.get_leaf_categories():
         # check if skipped
-        if self.skip_category(self.inst_dict["task"], cat_inst):
+        if self.skip_category(cat_inst):
             continue
 
         # treat all selections as lists of categorizers
-        for sel in law.util.make_list(cat_inst.selection):
+        for sel in law.util.flatten(cat_inst.selection):
             if Categorizer.derived_by(sel):
                 categorizer = sel
             elif Categorizer.has_cls(sel):
@@ -99,7 +101,7 @@ def category_ids_init(self: Producer) -> None:
             self.uses.add(categorizer)
             self.produces.add(categorizer)
 
-            self.categorizer_map[cat_inst].append(categorizer)
+            self.categorizer_map.setdefault(cat_inst, []).append(categorizer)
 
-    # cast to normal dict to prevent silent failures on KeyError
-    self.categorizer_map = dict(self.categorizer_map)
+    # store a list of unique categorizers
+    self.unique_categorizers = law.util.make_unique(sum(self.categorizer_map.values(), []))

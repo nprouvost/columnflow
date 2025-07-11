@@ -8,9 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import law
+
 from columnflow.production import Producer, producer
-from columnflow.util import maybe_import, InsertableDict, load_correction_set
-from columnflow.columnar_util import set_ak_column, flat_np_view, layout_ak_array
+from columnflow.util import maybe_import, load_correction_set, DotDict
+from columnflow.columnar_util import set_ak_column, flat_np_view, layout_ak_array, EMPTY_FLOAT
+from columnflow.types import Any, Callable
 
 np = maybe_import("numpy")
 ak = maybe_import("awkward")
@@ -20,7 +23,7 @@ ak = maybe_import("awkward")
 class ElectronSFConfig:
     correction: str
     campaign: str
-    working_point: str = ""
+    working_point: str | dict[str, Callable] = ""
     hlt_path: str = ""
 
     def __post_init__(self) -> None:
@@ -30,10 +33,7 @@ class ElectronSFConfig:
             raise ValueError("only one of working_point or hlt_path must be set")
 
     @classmethod
-    def new(
-        cls,
-        obj: ElectronSFConfig | tuple[str, str, str],
-    ) -> ElectronSFConfig:
+    def new(cls, obj: ElectronSFConfig | tuple[str, str, str]) -> ElectronSFConfig:
         # purely for backwards compatibility with the old tuple format
         if isinstance(obj, cls):
             return obj
@@ -88,6 +88,21 @@ def electron_weights(
             working_point="wp80iso",  # for trigger weights use hlt_path instead
         )
 
+    The *working_point* can also be a dictionary mapping working point names to functions
+    that return a boolean mask for the electrons. This is useful to compute scale factors for
+    multiple working points at once, e.g. for the electron reconstruction scale factors:
+
+    .. code-block:: python
+        cfg.x.electron_sf_names = ElectronSFConfig(
+            correction="Electron-ID-SF",
+            campaign="2022Re-recoE+PromptFG",
+            working_point={
+                "RecoBelow20": lambda variable_map: variable_map["pt"] < 20.0,
+                "Reco20to75": lambda variable_map: (variable_map["pt"] >= 20.0) & (variable_map["pt"] < 75.0),
+                "RecoAbove75": lambda variable_map: variable_map["pt"] >= 75.0,
+            },
+        )
+
     *get_electron_config* can be adapted in a subclass in case it is stored differently in the
     config.
 
@@ -121,8 +136,28 @@ def electron_weights(
             **variable_map,
             "ValType": syst,
         }
-        inputs = [variable_map_syst[inp.name] for inp in self.electron_sf_corrector.inputs]
-        sf_flat = self.electron_sf_corrector(*inputs)
+        if isinstance(variable_map["WorkingPoint"], str):
+            inputs = [variable_map_syst[inp.name] for inp in self.electron_sf_corrector.inputs]
+            sf_flat = self.electron_sf_corrector(*inputs)
+        elif isinstance(variable_map["WorkingPoint"], dict):
+            sf_flat = np.ones_like(pt, dtype=np.float32) * EMPTY_FLOAT
+            for working_point, mask_fn in variable_map_syst["WorkingPoint"].items():
+                mask = mask_fn(variable_map)
+                variable_map_syst_wp = {
+                    **variable_map_syst,
+                    "WorkingPoint": working_point,
+                }
+                for key, value in variable_map_syst_wp.items():
+                    # apply mask to array-like values
+                    if isinstance(value, np.ndarray) or isinstance(value, ak.Array):
+                        variable_map_syst_wp[key] = value[mask]
+                # call the corrector with the masked inputs
+                inputs = [variable_map_syst_wp[inp.name] for inp in self.electron_sf_corrector.inputs]
+                sf_flat[mask] = self.electron_sf_corrector(*inputs)
+            if np.any(sf_flat == EMPTY_FLOAT):
+                raise ValueError("some electrons did not have a valid scale factor, check your inputs")
+        else:
+            raise ValueError(f"unsupported working point type {type(variable_map['WorkingPoint'])}")
 
         # add the correct layout to it
         sf = layout_ak_array(sf_flat, events.Electron.pt[electron_mask])
@@ -143,28 +178,33 @@ def electron_weights_init(self: Producer, **kwargs) -> None:
 
 
 @electron_weights.requires
-def electron_weights_requires(self: Producer, reqs: dict) -> None:
+def electron_weights_requires(
+    self: Producer,
+    task: law.Task,
+    reqs: dict[str, DotDict[str, Any]],
+    **kwargs,
+) -> None:
     if "external_files" in reqs:
         return
 
     from columnflow.tasks.external import BundleExternalFiles
-    reqs["external_files"] = BundleExternalFiles.req(self.task)
+    reqs["external_files"] = BundleExternalFiles.req(task)
 
 
 @electron_weights.setup
 def electron_weights_setup(
     self: Producer,
-    reqs: dict,
-    inputs: dict,
-    reader_targets: InsertableDict,
+    task: law.Task,
+    reqs: dict[str, DotDict[str, Any]],
+    inputs: dict[str, Any],
+    reader_targets: law.util.InsertableDict,
+    **kwargs,
 ) -> None:
-    bundle = reqs["external_files"]
+    self.electron_config = self.get_electron_config()
 
     # load the corrector
-    correction_set = load_correction_set(self.get_electron_file(bundle.files))
-
-    self.electron_config: ElectronSFConfig = self.get_electron_config()
-    self.electron_sf_corrector = correction_set[self.electron_config.correction]
+    e_file = self.get_electron_file(reqs["external_files"].files)
+    self.electron_sf_corrector = load_correction_set(e_file)[self.electron_config.correction]
 
     # the ValType key accepts different arguments for efficiencies and scale factors
     if self.electron_config.correction.endswith("Eff"):
@@ -187,3 +227,16 @@ electron_trigger_weights = electron_weights.derive(
         "weight_name": "electron_trigger_weight",
     },
 )
+
+
+@producer(
+    uses={"Electron.{pt,phi,eta,deltaEtaSC}"},
+    produces={"Electron.superclusterEta"},
+)
+def electron_sceta(self, events: ak.Array, **kwargs) -> ak.Array:
+    """
+    Returns the electron super cluster eta.
+    """
+    sc_eta = events.Electron.eta + events.Electron.deltaEtaSC
+    events = set_ak_column(events, "Electron.superclusterEta", sc_eta, value_type=np.float32)
+    return events

@@ -39,6 +39,8 @@ class TopPtWeightConfig:
     # requested GenPartonTop columns, passed to the *uses* and *produces*
     produced_top_columns={"pt"},
     mc_only=True,
+    # skip the producer unless the datasets has this specified tag (no skip check performed when none)
+    require_dataset_tag="has_top",
 )
 def gen_parton_top(self: Producer, events: ak.Array, **kwargs) -> ak.Array:
     """
@@ -65,10 +67,23 @@ def gen_parton_top(self: Producer, events: ak.Array, **kwargs) -> ak.Array:
 
 
 @gen_parton_top.init
-def gen_parton_top_init(self: Producer) -> bool:
+def gen_parton_top_init(self: Producer, **kwargs) -> bool:
     for col in self.produced_top_columns:
         self.uses.add(f"GenPart.{col}")
         self.produces.add(f"GenPartonTop.{col}")
+
+
+@gen_parton_top.skip
+def gen_parton_top_skip(self: Producer, **kwargs) -> bool:
+    """
+    Custom skip function that checks whether the dataset is a MC simulation containing top quarks in the first place
+    using the :py:attr:`require_dataset_tag` attribute.
+    """
+    # never skip if the tag is not set
+    if self.require_dataset_tag is None:
+        return False
+
+    return self.dataset_inst.is_data or not self.dataset_inst.has_tag(self.require_dataset_tag)
 
 
 def get_top_pt_weight_config(self: Producer) -> TopPtWeightConfig:
@@ -89,6 +104,8 @@ def get_top_pt_weight_config(self: Producer) -> TopPtWeightConfig:
     uses={"GenPartonTop.pt"},
     produces={"top_pt_weight{,_up,_down}"},
     get_top_pt_weight_config=get_top_pt_weight_config,
+    # skip the producer unless the datasets has this specified tag (no skip check performed when none)
+    require_dataset_tag="is_ttbar",
 )
 def top_pt_weight(self: Producer, events: ak.Array, **kwargs) -> ak.Array:
     """
@@ -146,3 +163,14 @@ def top_pt_weight(self: Producer, events: ak.Array, **kwargs) -> ak.Array:
 def top_pt_weight_init(self: Producer) -> None:
     # store the top pt weight config
     self.cfg = self.get_top_pt_weight_config()
+
+
+@top_pt_weight.skip
+def top_pt_weight_skip(self: Producer, **kwargs) -> bool:
+    """
+    Skip if running on anything except ttbar MC simulation, evaluated via the :py:attr:`require_dataset_tag` attribute.
+    """
+    if self.require_dataset_tag is None:
+        return self.dataset_inst.is_data
+
+    return self.dataset_inst.is_data or not self.dataset_inst.has_tag("is_ttbar")

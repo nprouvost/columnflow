@@ -11,26 +11,28 @@ import order as od
 
 from columnflow.tasks.framework.base import Requirements, ShiftTask
 from columnflow.tasks.framework.mixins import (
-    CalibratorsMixin, SelectorStepsMixin, ProducersMixin, MLModelsMixin, WeightProducerMixin,
-    VariablesMixin, DatasetsProcessesMixin, CategoriesMixin, ShiftSourcesMixin,
+    CalibratorClassesMixin, SelectorClassMixin, ReducerClassMixin, ProducerClassesMixin, MLModelsMixin,
+    HistProducerClassMixin, VariablesMixin, DatasetsProcessesMixin, CategoriesMixin, ShiftSourcesMixin,
 )
 from columnflow.tasks.histograms import MergeHistograms, MergeShiftedHistograms
 from columnflow.util import dev_sandbox, maybe_import
 
-ak = maybe_import("awkward")
 hist = maybe_import("hist")
 
 
 class HistogramsUserBase(
-    CalibratorsMixin,
-    SelectorStepsMixin,
-    ProducersMixin,
-    WeightProducerMixin,
+    CalibratorClassesMixin,
+    SelectorClassMixin,
+    ReducerClassMixin,
+    ProducerClassesMixin,
+    HistProducerClassMixin,
     MLModelsMixin,
     DatasetsProcessesMixin,
     CategoriesMixin,
     VariablesMixin,
 ):
+    single_config = True
+
     sandbox = dev_sandbox(law.config.get("analysis", "default_columnar_sandbox"))
 
     def store_parts(self) -> law.util.InsertableDict:
@@ -111,19 +113,19 @@ class HistogramsUserBase(
         # axis selections
         h = h[{
             "process": [
-                hist.loc(p.id)
+                hist.loc(p.name)
                 for p in sub_process_insts
-                if p.id in h.axes["process"]
+                if p.name in h.axes["process"]
             ],
             "category": [
-                hist.loc(c.id)
+                hist.loc(c.name)
                 for c in leaf_category_insts
-                if c.id in h.axes["category"]
+                if c.name in h.axes["category"]
             ],
             "shift": [
-                hist.loc(s.id)
+                hist.loc(s.name)
                 for s in shift_insts
-                if s.id in h.axes["shift"]
+                if s.name in h.axes["shift"]
             ],
         }]
 
@@ -138,6 +140,8 @@ class HistogramsUserSingleShiftBase(
     ShiftTask,
     HistogramsUserBase,
 ):
+    # use the MergeHistograms task to trigger upstream TaskArrayFunction initialization
+    resolution_task_cls = MergeHistograms
 
     # upstream requirements
     reqs = Requirements(
@@ -165,6 +169,9 @@ class HistogramsUserMultiShiftBase(
     ShiftSourcesMixin,
     HistogramsUserBase,
 ):
+    # use the MergeHistograms task to trigger upstream TaskArrayFunction initialization
+    resolution_task_cls = MergeHistograms
+
     # upstream requirements
     reqs = Requirements(
         MergeShiftedHistograms=MergeShiftedHistograms,

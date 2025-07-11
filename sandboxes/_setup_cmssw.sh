@@ -173,7 +173,7 @@ setup_cmssw() {
         fi
 
         # create the pending_flag to express that the venv state might be changing
-        touch "${pending_flag_file}"
+        [ ! -f "${pending_flag_file}" ] && touch "${pending_flag_file}"
         clear_pending() {
             rm -f "${pending_flag_file}"
         }
@@ -234,12 +234,14 @@ setup_cmssw() {
                 if command -v cf_cmssw_custom_install &> /dev/null; then
                     echo -e "\nrunning cf_cmssw_custom_install"
                     cf_cmssw_custom_install &&
-                    cd "${install_path}/src" &&
+                    source "/cvmfs/cms.cern.ch/cmsset_default.sh" "" &&
+                    cd "${install_path}/src" && 
                     scram b
                 elif [ ! -z "${cf_cmssw_custom_install}" ] && [ -f "${cf_cmssw_custom_install}" ]; then
                     echo -e "\nsourcing cf_cmssw_custom_install file"
                     source "${cf_cmssw_custom_install}" "" &&
-                    cd "${install_path}/src" &&
+                    source "/cvmfs/cms.cern.ch/cmsset_default.sh" "" &&
+                    cd "${install_path}/src" && 
                     scram b
                 fi
             )
