@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 import itertools
-from collections import Counter
+from collections import Counter, defaultdict
 
 import luigi
 import law
@@ -28,6 +28,7 @@ from columnflow.columnar_util import Route, ColumnCollection, ChunkedIOHandler, 
 from columnflow.util import maybe_import, DotDict, get_docs_url, get_code_url
 from columnflow.types import Callable
 
+np = maybe_import("numpy")
 ak = maybe_import("awkward")
 
 
@@ -91,21 +92,6 @@ class CalibratorClassMixin(ArrayFunctionClassMixin):
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"calibrator"}
         return super().req_params(inst, **kwargs)
 
-    @property
-    def calibrator_repr(self) -> str:
-        """
-        Return a string representation of the calibrator class.
-        """
-        return self.build_repr(self.array_function_cls_repr(self.calibrator))
-
-    def store_parts(self) -> law.util.InsertableDict:
-        """
-        :return: Dictionary with parts that will be translated into an output directory path.
-        """
-        parts = super().store_parts()
-        parts.insert_after(self.config_store_anchor, "calibrator", f"calib__{self.calibrator_repr}")
-        return parts
-
     @classmethod
     def get_config_lookup_keys(
         cls,
@@ -124,6 +110,21 @@ class CalibratorClassMixin(ArrayFunctionClassMixin):
             keys[prefix] = f"{prefix}_{calibrator}"
 
         return keys
+
+    @property
+    def calibrator_repr(self) -> str:
+        """
+        Return a string representation of the calibrator class.
+        """
+        return self.build_repr(self.array_function_cls_repr(self.calibrator))
+
+    def store_parts(self) -> law.util.InsertableDict:
+        """
+        :return: Dictionary with parts that will be translated into an output directory path.
+        """
+        parts = super().store_parts()
+        parts.insert_after(self.config_store_anchor, "calibrator", f"calib__{self.calibrator_repr}")
+        return parts
 
 
 class CalibratorMixin(ArrayFunctionInstanceMixin, CalibratorClassMixin):
@@ -198,6 +199,23 @@ class CalibratorMixin(ArrayFunctionInstanceMixin, CalibratorClassMixin):
 
         super().get_known_shifts(params, shifts)
 
+    @classmethod
+    def req_other_calibrator(cls, inst: CalibratorMixin, **kwargs) -> CalibratorMixin:
+        """
+        Same as :py:meth:`req` but overwrites specific arguments for instantiation that simplify requesting a different
+        calibrator instance.
+
+        :param inst: The reference instance to request parameters from.
+        :param kwargs: Additional arguments forwarded to :py:meth:`req`.
+        :return: A new instance of *this* class.
+        """
+        # calibrator_inst and known_shifts must be set to None to by-pass calibrator instance cache lookup and thus,
+        # also full parameter resolution
+        kwargs.setdefault("calibrator_inst", None)
+        kwargs.setdefault("known_shifts", None)
+
+        return cls.req(inst, **kwargs)
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
@@ -209,9 +227,9 @@ class CalibratorMixin(ArrayFunctionInstanceMixin, CalibratorClassMixin):
         self.calibrator_inst.run_post_init(task=self, **kwargs)
         super()._array_function_post_init(**kwargs)
 
-    def teardown_calibrator_inst(self) -> None:
+    def teardown_calibrator_inst(self, **kwargs) -> None:
         if self.calibrator_inst:
-            self.calibrator_inst.run_teardown(task=self)
+            self.calibrator_inst.run_teardown(task=self, **kwargs)
 
     @property
     def calibrator_repr(self) -> str:
@@ -477,6 +495,25 @@ class SelectorClassMixin(ArrayFunctionClassMixin):
         }
         return super().req_params(inst, **kwargs)
 
+    @classmethod
+    def get_config_lookup_keys(
+        cls,
+        inst_or_params: SelectorClassMixin | dict[str, Any],
+    ) -> law.util.InsertiableDict:
+        keys = super().get_config_lookup_keys(inst_or_params)
+
+        # add the selector name
+        selector = (
+            inst_or_params.get("selector")
+            if isinstance(inst_or_params, dict)
+            else getattr(inst_or_params, "selector", None)
+        )
+        if selector not in (law.NO_STR, None, ""):
+            prefix = "sel"
+            keys[prefix] = f"{prefix}_{selector}"
+
+        return keys
+
     @property
     def selector_repr(self) -> str:
         """
@@ -497,25 +534,6 @@ class SelectorClassMixin(ArrayFunctionClassMixin):
         parts = super().store_parts()
         parts.insert_after(self.config_store_anchor, "selector", f"sel__{self.selector_repr}")
         return parts
-
-    @classmethod
-    def get_config_lookup_keys(
-        cls,
-        inst_or_params: SelectorClassMixin | dict[str, Any],
-    ) -> law.util.InsertiableDict:
-        keys = super().get_config_lookup_keys(inst_or_params)
-
-        # add the selector name
-        selector = (
-            inst_or_params.get("selector")
-            if isinstance(inst_or_params, dict)
-            else getattr(inst_or_params, "selector", None)
-        )
-        if selector not in (law.NO_STR, None, ""):
-            prefix = "sel"
-            keys[prefix] = f"{prefix}_{selector}"
-
-        return keys
 
 
 class SelectorMixin(ArrayFunctionInstanceMixin, SelectorClassMixin):
@@ -585,6 +603,23 @@ class SelectorMixin(ArrayFunctionInstanceMixin, SelectorClassMixin):
 
         super().get_known_shifts(params, shifts)
 
+    @classmethod
+    def req_other_selector(cls, inst: SelectorMixin, **kwargs) -> SelectorMixin:
+        """
+        Same as :py:meth:`req` but overwrites specific arguments for instantiation that simplify requesting a different
+        selector instance.
+
+        :param inst: The reference instance to request parameters from.
+        :param kwargs: Additional arguments forwarded to :py:meth:`req`.
+        :return: A new instance of *this* class.
+        """
+        # selector_inst and known_shifts must be set to None to by-pass selector instance cache lookup and thus, also
+        # full parameter resolution
+        kwargs.setdefault("selector_inst", None)
+        kwargs.setdefault("known_shifts", None)
+
+        return cls.req(inst, **kwargs)
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
@@ -596,9 +631,9 @@ class SelectorMixin(ArrayFunctionInstanceMixin, SelectorClassMixin):
         self.selector_inst.run_post_init(task=self, **kwargs)
         super()._array_function_post_init(**kwargs)
 
-    def teardown_selector_inst(self) -> None:
+    def teardown_selector_inst(self, **kwargs) -> None:
         if self.selector_inst:
-            self.selector_inst.run_teardown(task=self)
+            self.selector_inst.run_teardown(task=self, **kwargs)
 
     @property
     def selector_repr(self) -> str:
@@ -676,21 +711,6 @@ class ReducerClassMixin(ArrayFunctionClassMixin):
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"reducer"}
         return super().req_params(inst, **kwargs)
 
-    @property
-    def reducer_repr(self) -> str:
-        """
-        Return a string representation of the reducer class.
-        """
-        return self.build_repr(self.array_function_cls_repr(self.reducer))
-
-    def store_parts(self) -> law.util.InsertableDict:
-        """
-        :return: Dictionary with parts that will be translated into an output directory path.
-        """
-        parts = super().store_parts()
-        parts.insert_after(self.config_store_anchor, "reducer", f"red__{self.reducer_repr}")
-        return parts
-
     @classmethod
     def get_config_lookup_keys(
         cls,
@@ -709,6 +729,21 @@ class ReducerClassMixin(ArrayFunctionClassMixin):
             keys[prefix] = f"{prefix}_{reducer}"
 
         return keys
+
+    @property
+    def reducer_repr(self) -> str:
+        """
+        Return a string representation of the reducer class.
+        """
+        return self.build_repr(self.array_function_cls_repr(self.reducer))
+
+    def store_parts(self) -> law.util.InsertableDict:
+        """
+        :return: Dictionary with parts that will be translated into an output directory path.
+        """
+        parts = super().store_parts()
+        parts.insert_after(self.config_store_anchor, "reducer", f"red__{self.reducer_repr}")
+        return parts
 
 
 class ReducerMixin(ArrayFunctionInstanceMixin, ReducerClassMixin):
@@ -783,6 +818,23 @@ class ReducerMixin(ArrayFunctionInstanceMixin, ReducerClassMixin):
 
         super().get_known_shifts(params, shifts)
 
+    @classmethod
+    def req_other_reducer(cls, inst: ReducerMixin, **kwargs) -> ReducerMixin:
+        """
+        Same as :py:meth:`req` but overwrites specific arguments for instantiation that simplify requesting a different
+        reducer instance.
+
+        :param inst: The reference instance to request parameters from.
+        :param kwargs: Additional arguments forwarded to :py:meth:`req`.
+        :return: A new instance of *this* class.
+        """
+        # reducer_inst and known_shifts must be set to None to by-pass reducer instance cache lookup and thus, also full
+        # parameter resolution
+        kwargs.setdefault("reducer_inst", None)
+        kwargs.setdefault("known_shifts", None)
+
+        return cls.req(inst, **kwargs)
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
@@ -794,9 +846,9 @@ class ReducerMixin(ArrayFunctionInstanceMixin, ReducerClassMixin):
         self.reducer_inst.run_post_init(task=self, **kwargs)
         super()._array_function_post_init(**kwargs)
 
-    def teardown_reducer_inst(self) -> None:
+    def teardown_reducer_inst(self, **kwargs) -> None:
         if self.reducer_inst:
-            self.reducer_inst.run_teardown(task=self)
+            self.reducer_inst.run_teardown(task=self, **kwargs)
 
     @property
     def reducer_repr(self) -> str:
@@ -852,21 +904,6 @@ class ProducerClassMixin(ArrayFunctionClassMixin):
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"producer"}
         return super().req_params(inst, **kwargs)
 
-    @property
-    def producer_repr(self) -> str:
-        """
-        Return a string representation of the producer class.
-        """
-        return self.build_repr(self.array_function_cls_repr(self.producer))
-
-    def store_parts(self) -> law.util.InsertableDict:
-        """
-        :return: Dictionary with parts that will be translated into an output directory path.
-        """
-        parts = super().store_parts()
-        parts.insert_after(self.config_store_anchor, "producer", f"prod__{self.producer_repr}")
-        return parts
-
     @classmethod
     def get_config_lookup_keys(
         cls,
@@ -885,6 +922,21 @@ class ProducerClassMixin(ArrayFunctionClassMixin):
             keys[prefix] = f"{prefix}_{producer}"
 
         return keys
+
+    @property
+    def producer_repr(self) -> str:
+        """
+        Return a string representation of the producer class.
+        """
+        return self.build_repr(self.array_function_cls_repr(self.producer))
+
+    def store_parts(self) -> law.util.InsertableDict:
+        """
+        :return: Dictionary with parts that will be translated into an output directory path.
+        """
+        parts = super().store_parts()
+        parts.insert_after(self.config_store_anchor, "producer", f"prod__{self.producer_repr}")
+        return parts
 
 
 class ProducerMixin(ArrayFunctionInstanceMixin, ProducerClassMixin):
@@ -959,6 +1011,23 @@ class ProducerMixin(ArrayFunctionInstanceMixin, ProducerClassMixin):
 
         super().get_known_shifts(params, shifts)
 
+    @classmethod
+    def req_other_producer(cls, inst: ProducerMixin, **kwargs) -> ProducerMixin:
+        """
+        Same as :py:meth:`req` but overwrites specific arguments for instantiation that simplify requesting a different
+        producer instance.
+
+        :param inst: The reference instance to request parameters from.
+        :param kwargs: Additional arguments forwarded to :py:meth:`req`.
+        :return: A new instance of *this* class.
+        """
+        # producer_inst and known_shifts must be set to None to by-pass producer instance cache lookup and thus, also
+        # full parameter resolution
+        kwargs.setdefault("producer_inst", None)
+        kwargs.setdefault("known_shifts", None)
+
+        return cls.req(inst, **kwargs)
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
@@ -970,9 +1039,9 @@ class ProducerMixin(ArrayFunctionInstanceMixin, ProducerClassMixin):
         self.producer_inst.run_post_init(task=self, **kwargs)
         super()._array_function_post_init(**kwargs)
 
-    def teardown_producer_inst(self) -> None:
+    def teardown_producer_inst(self, **kwargs) -> None:
         if self.producer_inst:
-            self.producer_inst.run_teardown(task=self)
+            self.producer_inst.run_teardown(task=self, **kwargs)
 
     @property
     def producer_repr(self) -> str:
@@ -1211,21 +1280,8 @@ class MLModelMixinBase(ConfigTask):
 
     @classmethod
     def req_params(cls, inst: law.Task, **kwargs) -> dict[str, Any]:
-        """
-        Get the required parameters for the task, preferring the ``--ml-model`` set on task-level
-        via CLI.
-
-        This method first checks if the ``--ml-model`` parameter is set at the task-level via the command line. If it
-        is, this parameter is preferred and added to the '_prefer_cli' key in the kwargs dictionary. The method then
-        calls the 'req_params' method of the superclass with the updated kwargs.
-
-        :param inst: The current task instance.
-        :param kwargs: Additional keyword arguments that may contain parameters for the task.
-        :return: A dictionary of parameters required for the task.
-        """
         # prefer --ml-model set on task-level via cli
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"ml_model"}
-
         return super().req_params(inst, **kwargs)
 
     @classmethod
@@ -1501,9 +1557,9 @@ class PreparationProducerMixin(ArrayFunctionInstanceMixin, MLModelMixin):
             self.preparation_producer_inst.run_post_init(task=self, **kwargs)
         super()._array_function_post_init(**kwargs)
 
-    def teardown_preparation_producer_inst(self) -> None:
+    def teardown_preparation_producer_inst(self, **kwargs) -> None:
         if self.preparation_producer_inst:
-            self.preparation_producer_inst.run_teardown(task=self)
+            self.preparation_producer_inst.run_teardown(task=self, **kwargs)
 
     @classmethod
     def resolve_instances(cls, params: dict[str, Any], shifts: TaskShifts) -> dict[str, Any]:
@@ -1594,7 +1650,6 @@ class MLModelsMixin(ConfigTask):
     def req_params(cls, inst: law.Task, **kwargs) -> dict:
         # prefer --ml-models set on task-level via cli
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"ml_models"}
-
         return super().req_params(inst, **kwargs)
 
     @property
@@ -1703,21 +1758,6 @@ class HistProducerClassMixin(ArrayFunctionClassMixin):
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"hist_producer"}
         return super().req_params(inst, **kwargs)
 
-    @property
-    def hist_producer_repr(self) -> str:
-        """
-        Return a string representation of the hist producer class.
-        """
-        return self.build_repr(self.array_function_cls_repr(self.hist_producer))
-
-    def store_parts(self) -> law.util.InsertableDict:
-        """
-        :return: Dictionary with parts that will be translated into an output directory path.
-        """
-        parts = super().store_parts()
-        parts.insert_after(self.config_store_anchor, "hist_producer", f"hist__{self.hist_producer_repr}")
-        return parts
-
     @classmethod
     def get_config_lookup_keys(
         cls,
@@ -1736,6 +1776,21 @@ class HistProducerClassMixin(ArrayFunctionClassMixin):
             keys[prefix] = f"{prefix}_{producer}"
 
         return keys
+
+    @property
+    def hist_producer_repr(self) -> str:
+        """
+        Return a string representation of the hist producer class.
+        """
+        return self.build_repr(self.array_function_cls_repr(self.hist_producer))
+
+    def store_parts(self) -> law.util.InsertableDict:
+        """
+        :return: Dictionary with parts that will be translated into an output directory path.
+        """
+        parts = super().store_parts()
+        parts.insert_after(self.config_store_anchor, "hist_producer", f"hist__{self.hist_producer_repr}")
+        return parts
 
 
 class HistProducerMixin(ArrayFunctionInstanceMixin, HistProducerClassMixin):
@@ -1813,6 +1868,23 @@ class HistProducerMixin(ArrayFunctionInstanceMixin, HistProducerClassMixin):
 
         super().get_known_shifts(params, shifts)
 
+    @classmethod
+    def req_other_hist_producer(cls, inst: HistProducerMixin, **kwargs) -> HistProducerMixin:
+        """
+        Same as :py:meth:`req` but overwrites specific arguments for instantiation that simplify requesting a different
+        hist producer instance.
+
+        :param inst: The reference instance to request parameters from.
+        :param kwargs: Additional arguments forwarded to :py:meth:`req`.
+        :return: A new instance of *this* class.
+        """
+        # hist_producer_inst and known_shifts must be set to None to by-pass hist producer instance cache lookup and
+        # thus, also full parameter resolution
+        kwargs.setdefault("hist_producer_inst", None)
+        kwargs.setdefault("known_shifts", None)
+
+        return cls.req(inst, **kwargs)
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
@@ -1824,9 +1896,9 @@ class HistProducerMixin(ArrayFunctionInstanceMixin, HistProducerClassMixin):
         self.hist_producer_inst.run_post_init(task=self, **kwargs)
         super()._array_function_post_init(**kwargs)
 
-    def teardown_hist_producer_inst(self) -> None:
+    def teardown_hist_producer_inst(self, **kwargs) -> None:
         if self.hist_producer_inst:
-            self.hist_producer_inst.run_teardown(task=self)
+            self.hist_producer_inst.run_teardown(task=self, **kwargs)
 
     @property
     def hist_producer_repr(self) -> str:
@@ -1861,10 +1933,9 @@ class InferenceModelClassMixin(ConfigTask):
         return params
 
     @classmethod
-    def req_params(cls, inst: law.Task, **kwargs) -> dict:
+    def req_params(cls, inst: law.Task, **kwargs) -> dict[str, Any]:
         # prefer --inference-model set on task-level via cli
         kwargs["_prefer_cli"] = law.util.make_set(kwargs.get("_prefer_cli", [])) | {"inference_model"}
-
         return super().req_params(inst, **kwargs)
 
     @property
@@ -2190,7 +2261,24 @@ class DatasetsProcessesMixin(ConfigTask):
                         deep=True,
                     )
                 else:
-                    processes = config_inst.processes.names()
+                    processes = list(config_inst.processes.names())
+                    # protect against overlap between top-level processes
+                    to_remove = defaultdict(set)
+                    for process_name in processes:
+                        process = config_inst.get_process(process_name)
+                        # check any remaining process for overlap
+                        for child_process_name in processes:
+                            if child_process_name == process_name:
+                                continue
+                            if process.has_process(child_process_name, deep=True):
+                                to_remove[child_process_name].add(process_name)
+                    if to_remove:
+                        processes = [process_name for process_name in processes if process_name not in to_remove]
+                        for removed, reasons in to_remove.items():
+                            reasons = ", ".join(map("'{}'".format, reasons))
+                            logger.warning(
+                                f"removed '{removed}' from selected processes due to overlap with {reasons}",
+                            )
                 if not processes and not cls.allow_empty_processes:
                     raise ValueError(f"no processes found matching {processes_orig}")
             if datasets != law.no_value:
@@ -2424,18 +2512,25 @@ class ChunkedIOMixin(ConfigTask):
     @classmethod
     def raise_if_not_finite(cls, ak_array: ak.Array) -> None:
         """
-        Checks whether all values in array *ak_array* are finite.
+        Checks whether values of all columns in *ak_array* are finite. String and bytestring types are skipped.
 
         The check is performed using the :external+numpy:py:func:`numpy.isfinite` function.
 
-        :param ak_array: Array with events to check.
+        :param ak_array: Array with columns to check.
         :raises ValueError: If any value in *ak_array* is not finite.
         """
-        import numpy as np
         from columnflow.columnar_util import get_ak_routes
 
         for route in get_ak_routes(ak_array):
-            if ak.any(~np.isfinite(ak.flatten(route.apply(ak_array), axis=None))):
+            # flatten
+            flat = ak.flatten(route.apply(ak_array), axis=None)
+            # perform parameter dependent checks
+            if isinstance((params := getattr(getattr(flat, "layout", None), "parameters", None)), dict):
+                # skip string and bytestring arrays
+                if params.get("__array__") in {"string", "bytestring"}:
+                    continue
+            # check finiteness
+            if ak.any(~np.isfinite(flat)):
                 raise ValueError(f"found one or more non-finite values in column '{route.column}' of array {ak_array}")
 
     @classmethod
@@ -2539,6 +2634,7 @@ class HistHookMixin(ConfigTask):
     def invoke_hist_hooks(
         self,
         hists: dict[od.Config, dict[od.Process, Any]],
+        hook_kwargs: dict | None = None,
     ) -> dict[od.Config, dict[od.Process, Any]]:
         """
         Invoke hooks to modify histograms before further processing such as plotting.
@@ -2560,7 +2656,7 @@ class HistHookMixin(ConfigTask):
 
             # invoke it
             self.publish_message(f"invoking hist hook '{hook}'")
-            hists = func(self, hists)
+            hists = func(self, hists, **(hook_kwargs or {}))
 
         return hists
 
