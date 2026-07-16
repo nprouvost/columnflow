@@ -9,15 +9,16 @@ from __future__ import annotations
 __all__ = []
 
 import re
+import pathlib
 import dataclasses
 import itertools
-from collections import OrderedDict, defaultdict
+import collections
 
 import law
 import order as od
 
-from columnflow.util import maybe_import, get_docs_url
 from columnflow.columnar_util import flat_np_view, layout_ak_array
+from columnflow.util import maybe_import, get_docs_url, CacheBase, PersistentCache
 from columnflow.types import Callable, Any, Sequence, Literal
 
 ak = maybe_import("awkward")
@@ -49,7 +50,7 @@ def get_events_from_categories(
             f"{get_events_from_categories.__name__} requires the 'category_ids' field to be present",
         )
 
-    categories = law.util.make_list(categories)
+    categories = law.util.make_unique(law.util.make_list(categories))
     if config_inst:
         # get category insts
         categories = [config_inst.get_category(cat) for cat in categories]
@@ -249,7 +250,7 @@ def get_datasets_from_process(
         return law.util.make_unique(dataset_insts)
 
     # at this point, strategy is exclusive or exclusive_strict
-    dataset_insts_dict: OrderedDict[str, od.Dataset] = OrderedDict()
+    dataset_insts_dict: collections.OrderedDict[str, od.Dataset] = collections.OrderedDict()
     for process_inst, _, child_insts in root_inst.walk_processes(include_self=True, algo="dfs_post"):
         # check if child processes have matched datasets already
         if child_insts:
@@ -263,7 +264,7 @@ def get_datasets_from_process(
                 continue
             # at this point, the process itself must be checked,
             # so remove potentially found datasets of children
-            dataset_insts_dict = OrderedDict({
+            dataset_insts_dict = collections.OrderedDict({
                 child_inst: _dataset_insts
                 for child_inst, _dataset_insts in dataset_insts_dict.items()
                 if child_inst not in child_insts
@@ -371,7 +372,7 @@ def group_shifts(
     An exception is raised in case a shift source is represented only by its up or down shift.
     """
     nominal = None
-    grouped = defaultdict(lambda: [None, None])
+    grouped = collections.defaultdict(lambda: [None, None])
 
     up_sources = set()
     down_sources = set()
@@ -399,20 +400,41 @@ def expand_shift_sources(shifts: Sequence[str] | set[str]) -> list[str]:
 
     .. code-block:: python
 
-        expand_shift_sources(["jes", "jer_up"])
-        # -> ["jes_up", "jes_down", "jer_up"]
+        expand_shift_sources(["jes", "jer_up", "nominal"])
+        # -> ["jes_up", "jes_down", "jer_up", "nominal"]
     """
     _shifts = []
     for shift in shifts:
-        try:
-            od.Shift.split_name(shift)
+        if shift == od.Shift.NOMINAL:
             _shifts.append(shift)
-        except ValueError as e:
-            if not isinstance(shift, str):
-                raise e
-            _shifts.extend([f"{shift}_{od.Shift.UP}", f"{shift}_{od.Shift.DOWN}"])
+        else:
+            try:
+                od.Shift.split_name(shift)
+                _shifts.append(shift)
+            except ValueError as e:
+                if not isinstance(shift, str):
+                    raise e
+                _shifts.extend([f"{shift}_{od.Shift.UP}", f"{shift}_{od.Shift.DOWN}"])
 
     return law.util.make_unique(_shifts)
+
+
+class CategoryIDCache(PersistentCache):
+
+    def __init__(self, cache_path: od.Config | str | pathlib.Path | law.FileSystemFileTarget) -> None:
+        # when a config object is given, store the cache in the law home dir
+        if isinstance(cache_path, od.Config):
+            cache_path = law.config.law_home_path(f"category_ids_{cache_path.name}.json")
+
+        super().__init__(cache_path)
+
+    def open(self) -> CategoryIDCache:
+        super().open()
+
+        # synchronize the maximum category id counter in order
+        od.Category._max_id = max(self.cache.values(), default=0)
+
+        return self
 
 
 def create_category_id(
@@ -433,7 +455,7 @@ def create_category_id(
         subsequently in an array, please be aware that values 8 or more require a ``np.int64``.
     """
     # create the hash
-    h = law.util.create_hash((config.name, config.id, category_name, salt), l=hash_len)
+    h = law.util.create_hash((config.name, config.id, category_name, salt), hash_len)
     h = int(h, base=16)
 
     # add an offset to ensure that are hashes are above a threshold
@@ -449,27 +471,50 @@ def add_category(
     **kwargs,
 ) -> od.Category:
     """
-    Creates a :py:class:`order.Category` instance by forwarding all *kwargs* to its constructor,
-    adds it to a *parent* object. such as a :py:class:`order.Config` or an other
-    :py:class:`order.Category`, and returns it. When *kwargs* do not contain a field *id*,
-    :py:func:`create_category_id` is used to create one.
+    Creates a :py:class:`order.Category` instance by forwarding all *kwargs* to its constructor, adds it to a *parent*
+    object. such as a :py:class:`order.Config` or an other :py:class:`order.Category`, and returns it.
+
+    When *kwargs* do not contain a field *id*, :py:func:`create_category_id` is used to create one. Additionally, if the
+    field *id* is given as a :py:class:`CacheBase` object, it is used to cache the created id for the given category
+    name.
 
     :param config: :py:class:`order.Config` object for which the category is created.
     :param parent: Parent object to which the category is added. If *None*, *config* is used.
     :param kwargs: Keyword arguments forwarded to the category constructor.
     :return: The newly created category instance.
     """
+    # name must be given
     if "name" not in kwargs:
         fields = ",".join(map(str, kwargs))
         raise ValueError(f"a field 'name' is required to create a category, got '{fields}'")
 
-    if "id" not in kwargs:
+    # default id
+    if kwargs.get("id") is None:
         kwargs["id"] = create_category_id(config, kwargs["name"])
 
+    # id can be a cache object
+    id_cache = None
+    if isinstance(kwargs["id"], CacheBase):
+        id_cache = kwargs["id"]
+        # use the cached id, or use "+" to auto-increment and store the id below
+        kwargs["id"] = (
+            id_cache.get(kwargs["name"])
+            if (id_cached := id_cache.has(kwargs["name"]))
+            else od.UniqueObject.AUTO_ID
+        )
+
+    # default parent
     if parent is None:
         parent = config
 
-    return parent.add_category(**kwargs)
+    # create the category
+    category = parent.add_category(**kwargs)
+
+    # cache if requested
+    if id_cache and not id_cached:
+        id_cache.set(category.name, category.id)
+
+    return category
 
 
 @dataclasses.dataclass
@@ -543,7 +588,8 @@ def create_category_combinations(
     *kwargs_fn*. This function is called with the categories (in a dictionary, mapped to the sequence names as given in
     *categories*) that contribute to the newly created category and should return a dictionary. If the fields ``"id"``
     and ``"selection"`` are missing, they are filled with reasonable defaults leading to a auto-generated, deterministic
-    id and a list of all parent selection statements.
+    id and a list of all parent selection statements. Similar to :py:func:`add_category`, the field ``"id"`` can be set
+    to a :py:class:`CacheBase` object to cache the created id for the given category name.
 
     If the name of a new category is already known to *config* it is skipped unless *skip_existing* is *False*. In
     addition, *skip_fn* can be a callable that receives a dictionary mapping group names to categories that represents
@@ -668,17 +714,35 @@ def create_category_combinations(
                 if "selection" not in kwargs:
                     kwargs["selection"] = [c.selection for c in root_cats.values()]
 
+                # use cache id if given
+                id_cache = None
+                if isinstance(kwargs["id"], CacheBase):
+                    id_cache = kwargs["id"]
+                    # use the cached id, or use "+" to auto-increment and store the id below
+                    kwargs["id"] = (
+                        id_cache.get(cat_name)
+                        if (id_cached := id_cache.has(cat_name))
+                        else od.UniqueObject.AUTO_ID
+                    )
+
                 # create the new category
                 cat = od.Category(name=cat_name, **kwargs)
-                created_categories[cat_name] = cat
+                created_categories[cat.name] = cat
+
+                # cache if requested
+                if id_cache and not id_cached:
+                    id_cache.set(cat.name, cat.id)
+
+                # add a tag to denote this category was auto-created
+                cat.add_tag("auto_created_by_combinations")
 
                 # ID uniqueness check: raise an error when a non-unique id is detected for a new category
                 if isinstance(kwargs["id"], int):
                     if kwargs["id"] in unique_ids_cache:
                         matching_cat = config.get_category(kwargs["id"])
-                        if matching_cat.name != cat_name:
+                        if matching_cat.name != cat.name:
                             raise ValueError(
-                                f"non-unique category id '{kwargs['id']}' for '{cat_name}' has already been used for "
+                                f"non-unique category id '{kwargs['id']}' for '{cat.name}' has already been used for "
                                 f"category '{matching_cat.name}'",
                             )
                     unique_ids_cache.add(kwargs["id"])
@@ -727,14 +791,21 @@ def create_category_combinations(
     return len(created_categories)
 
 
-def track_category_changes(config: od.Config, summary_path: str | None = None) -> None:
+def track_category_changes(
+    config: od.Config,
+    summary_path: str | None = None,
+    skip_auto_created: bool = False,
+) -> None:
     """
     Scans the categories in *config* and saves a summary in a file located at *summary_path*. If the file exists,
     the summary from a previous run is loaded first and compare to the current categories. If changes are found, a
     warning is shown with details about these changes.
 
+    Categories automatically created via :py:func:`create_category_combinations` can be skipped via *skip_auto_created*.
+
     :param config: :py:class:`~order.config.Config` instance to scan for categories.
     :param summary_path: Path to the summary file. Defaults to "$LAW_HOME/category_summary_{config.name}.json".
+    :param skip_auto_created: If *True*, categories with the tag "auto_created_by_combinations" are skipped.
     """
     # build summary file as law target
     if not summary_path:
@@ -742,7 +813,11 @@ def track_category_changes(config: od.Config, summary_path: str | None = None) -
     summary_file = law.LocalFileTarget(summary_path)
 
     # gather category info
-    cat_pairs = sorted((cat.name, cat.id) for cat, *_ in config.walk_categories(include_self=True))
+    cat_pairs = sorted(
+        (cat.name, cat.id)
+        for cat, *_ in config.walk_categories(include_self=True)
+        if not skip_auto_created or not cat.has_tag("auto_created_by_combinations")
+    )
     cat_summary = {
         "hash": law.util.create_hash(cat_pairs),
         "categories": dict(cat_pairs),

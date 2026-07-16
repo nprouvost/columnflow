@@ -98,7 +98,7 @@ def get_br_from_inclusive_datasets(
 
     # step 3: per process, structure the assigned datasets and corresponding processes in DAGs, from more inclusive down
     #         to more exclusive phase spaces; usually each DAG can contain multiple paths to compute the BR of a single
-    #         process; this is resolved in step 4
+    #         process; this is selected and resolved in step 4
     @dataclasses.dataclass
     class Node:
         process_inst: od.Process
@@ -330,7 +330,7 @@ def normalization_weights(self: Producer, events: ak.Array, **kwargs) -> ak.Arra
         )
 
     # read the weight per process (defined as lumi * xsec / sum_weights) from the lookup table
-    process_weight = np.squeeze(np.asarray(self.process_weight_table[process_id, 0].todense()))
+    process_weight = np.squeeze(np.asarray(self.process_weight_table[process_id].todense()), axis=-1)
 
     # compute the weight and store it
     norm_weight = events.mc_weight * process_weight
@@ -349,6 +349,8 @@ def normalization_weights_init(self: Producer, **kwargs) -> None:
     """
     Initializes the normalization weights producer by setting up the normalization weight column.
     """
+    super(normalization_weights, self).init_func(**kwargs)
+
     # declare the weight name to be a produced column
     self.produces.add(self.weight_name)
 
@@ -376,6 +378,8 @@ def normalization_weights_requires(
     """
     Adds the requirements needed by the underlying py:attr:`task` to access selection stats into *reqs*.
     """
+    super(normalization_weights, self).requires_func(task=task, reqs=reqs, **kwargs)
+
     # check that all datasets are known
     for dataset in self.required_datasets:
         if not self.config_inst.has_dataset(dataset):
@@ -411,6 +415,14 @@ def normalization_weights_setup(
             weights per process.
         - py: attr: `known_process_ids`: A set of all process ids that are known by the lookup table.
     """
+    super(normalization_weights, self).setup_func(
+        task=task,
+        reqs=reqs,
+        inputs=inputs,
+        reader_targets=reader_targets,
+        **kwargs,
+    )
+
     import scipy.sparse
 
     # load the selection stats
@@ -469,12 +481,27 @@ def normalization_weights_setup(
         self.update_dataset_selection_stats,
     )
 
+    # consistency check 1: none of the processes should be a sub-process of another one, i.e., they should all be
+    # "lowest level" processes; if not, the (sub) process id assignment was not done correctly
+    all_process_ids = list(map(int, merged_selection_stats_sum_weights["sum_mc_weight_per_process"]))
+    all_process_insts = list(map(self.config_inst.get_process, all_process_ids))
+    for proc_inst_1, proc_inst_2 in itertools.combinations(all_process_insts, 2):
+        contains_1_2 = proc_inst_1.has_process(proc_inst_2, deep=True)
+        contains_2_1 = proc_inst_2.has_process(proc_inst_1, deep=True)
+        if contains_1_2 or contains_2_1:
+            raise Exception(
+                f"found two processes '{proc_inst_1.name}' ({proc_inst_1.id}) and '{proc_inst_2.name}' "
+                f"({proc_inst_2.id}) in the merged selection stats that are sub-processes of each other; this is "
+                "most likely a misconfiguration of the manual sub process id assignment upstream; make sure that "
+                f"the sub-processes of '{(proc_inst_1 if contains_1_2 else proc_inst_2).name}' are assigned instead",
+            )
+
     # get all process ids and instances seen and assigned during selection of this dataset
     # (i.e., all possible processes that might be encountered during event processing)
     process_ids = set(map(int, dataset_selection_stats_br[self.dataset_inst.name]["sum_mc_weight_per_process"]))
     process_insts = set(map(self.config_inst.get_process, process_ids))
 
-    # consistency check: when the main process of the current dataset is part of these "lowest level" processes,
+    # consistency check 2: when the main process of the current dataset is part of these "lowest level" processes,
     # there should only be this single process, otherwise the manual (sub) process assignment does not match the
     # general dataset -> main process info
     if self.dataset_inst.processes.get_first() in process_insts and len(process_insts) > 1:
@@ -486,7 +513,7 @@ def normalization_weights_setup(
         )
 
     # setup the event weight lookup table
-    process_weight_table = scipy.sparse.lil_matrix((max(process_ids) + 1, 1), dtype=np.float32)
+    process_weight_table = scipy.sparse.dok_matrix((max(process_ids) + 1, 1), dtype=np.float32)
 
     def fill_weight_table(process_inst: od.Process, xsec: float, sum_weights: float) -> None:
         if sum_weights == 0:
@@ -504,7 +531,13 @@ def normalization_weights_setup(
 
     # prepare info for the inclusive dataset
     inclusive_proc = self.inclusive_dataset.processes.get_first()
-    inclusive_xsec = inclusive_proc.get_xsec(self.config_inst.campaign.ecm).nominal
+    try:
+        inclusive_xsec = inclusive_proc.get_xsec(self.config_inst.campaign.ecm).nominal
+    except KeyError as e:
+        raise KeyError(
+            f"no cross section registered for inclusive process {inclusive_proc} for center-of-mass energy of "
+            f"{self.config_inst.campaign.ecm}",
+        ) from e
 
     # compute the weight the inclusive dataset would have on its own without stitching
     if self.allow_stitching and self.dataset_inst == self.inclusive_dataset:

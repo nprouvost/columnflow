@@ -30,7 +30,7 @@ from columnflow.plotting.plot_util import (
     remove_negative_contributions,
     join_labels,
 )
-from columnflow.hist_util import add_missing_shifts
+from columnflow.hist_util import add_missing_shifts, sum_hists
 from columnflow.types import TYPE_CHECKING, Iterable
 
 np = maybe_import("numpy")
@@ -91,6 +91,7 @@ def plot_variable_stack(
         hists,
         shape_norm=shape_norm,
         shift_insts=shift_insts,
+        density=density,
         **kwargs,
     )
 
@@ -264,7 +265,7 @@ def plot_shifted_variable(
         add_missing_shifts(h, all_shifts, str_axis="shift", nominal_bin="nominal")
 
     # create the sum of histograms over all processes
-    h_sum = sum(list(hists.values())[1:], list(hists.values())[0].copy())
+    h_sum = sum_hists(hists.values())
 
     # setup plotting configs
     plot_config = {}
@@ -325,7 +326,7 @@ def plot_shifted_variable(
     if legend_title:
         default_style_config["legend_cfg"]["title"] = legend_title
     if shape_norm:
-        style_config["ax_cfg"]["ylabel"] = "Normalized entries"
+        default_style_config["ax_cfg"]["ylabel"] = "Normalized entries"
     style_config = law.util.merge_dicts(
         default_style_config,
         process_style_config,

@@ -37,6 +37,12 @@ class UniteColumns(_UniteColumns):
 
     sandbox = dev_sandbox(law.config.get("analysis", "default_columnar_sandbox"))
 
+    keep_columns_key = luigi.Parameter(
+        default=law.NO_STR,
+        description="if the 'keep_columns' auxiliary config entry for the task family 'cf.UniteColumns' is defined as "
+        "a dictionary, this key can selects which of the entries of columns to use; uses all columns when empty; "
+        "default: empty",
+    )
     file_type = luigi.ChoiceParameter(
         default="parquet",
         choices=("parquet", "root"),
@@ -57,30 +63,28 @@ class UniteColumns(_UniteColumns):
     def workflow_requires(self):
         reqs = super().workflow_requires()
 
+        # depending on pilot flag, add upstream workflows or pass-through their own requirements only
+        reqs["producers"] = list(map(self.pilot_workflow_requires, (
+            self.reqs.ProduceColumns.req(
+                self,
+                producer=producer_inst.cls_name,
+                producer_inst=producer_inst,
+            )
+            for producer_inst in self.producer_insts
+            if producer_inst.produced_columns
+        )))
+        reqs["ml"] = list(map(self.pilot_workflow_requires, (
+            self.reqs.MLEvaluation.req(self, ml_model=m)
+            for m in self.ml_models
+        )))
+
         # require the full merge forest
         reqs["events"] = self.reqs.ProvideReducedEvents.req(self)
-
-        if not self.pilot:
-            if self.producer_insts:
-                reqs["producers"] = [
-                    self.reqs.ProduceColumns.req(
-                        self,
-                        producer=producer_inst.cls_name,
-                        producer_inst=producer_inst,
-                    )
-                    for producer_inst in self.producer_insts
-                    if producer_inst.produced_columns
-                ]
-            if self.ml_model_insts:
-                reqs["ml"] = [
-                    self.reqs.MLEvaluation.req(self, ml_model=m)
-                    for m in self.ml_models
-                ]
 
         return reqs
 
     def requires(self):
-        reqs = {"events": self.reqs.ProvideReducedEvents.req(self)}
+        reqs = {}
 
         if self.producer_insts:
             reqs["producers"] = [
@@ -98,13 +102,17 @@ class UniteColumns(_UniteColumns):
                 for m in self.ml_models
             ]
 
+        # require merged events
+        reqs["events"] = self.reqs.ProvideReducedEvents.req(self)
+
         return reqs
 
     workflow_condition = ReducedEventsUser.workflow_condition.copy()
 
     @workflow_condition.output
     def output(self):
-        return {"events": self.target(f"data_{self.branch}.{self.file_type}")}
+        key_postfix = "" if self.keep_columns_key in {law.NO_STR, "", None} else f"_{self.keep_columns_key}"
+        return {"events": self.target(f"data_{self.branch}{key_postfix}.{self.file_type}")}
 
     @law.decorator.notify
     @law.decorator.log
@@ -127,7 +135,18 @@ class UniteColumns(_UniteColumns):
         # define columns that will be written
         write_columns: set[Route] = set()
         skip_columns: set[Route] = set()
-        for c in self.config_inst.x.keep_columns.get(self.task_family, ["*"]):
+        keep_struct = self.config_inst.x.keep_columns.get(self.task_family, ["*"])
+        if isinstance(keep_struct, dict):
+            if self.keep_columns_key not in {law.NO_STR, "", None}:
+                if self.keep_columns_key not in keep_struct:
+                    raise KeyError(
+                        f"keep_columns_key '{self.keep_columns_key}' not found in keep_columns config entry for "
+                        f"task family '{self.task_family}', existing keys: {list(keep_struct.keys())}",
+                    )
+                keep_struct = keep_struct[self.keep_columns_key]
+            else:
+                keep_struct = law.util.flatten(keep_struct.values())
+        for c in law.util.make_unique(keep_struct):
             for r in self._expand_keep_column(c):
                 if r.has_tag("skip"):
                     skip_columns.add(r)

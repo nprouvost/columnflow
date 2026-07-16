@@ -6,7 +6,6 @@ Basic objects for defining statistical inference models.
 
 from __future__ import annotations
 
-import enum
 import copy as _copy
 
 import law
@@ -15,8 +14,7 @@ import yaml
 
 from columnflow.types import Generator, Callable, TextIO, Sequence, Any, Hashable, Type, T
 from columnflow.util import (
-    CachedDerivableMeta, Derivable, DotDict, is_pattern, is_regex, pattern_matcher, get_docs_url,
-    freeze,
+    CachedDerivableMeta, Derivable, DotDict, is_pattern, is_regex, pattern_matcher, get_docs_url, freeze, StrEnum,
 )
 
 
@@ -25,7 +23,7 @@ logger = law.logger.get_logger(__name__)
 default_dataset = law.config.get_expanded("analysis", "default_dataset")
 
 
-class ParameterType(enum.Enum):
+class ParameterType(StrEnum):
     """
     Parameter type flag.
 
@@ -39,12 +37,6 @@ class ParameterType(enum.Enum):
     rate_uniform = "rate_uniform"
     rate_unconstrained = "rate_unconstrained"
     shape = "shape"
-
-    def __repr__(self) -> str:
-        return f"<{self.__class__.__name__}.{self.value}>"
-
-    def __str__(self) -> str:
-        return self.value
 
     @property
     def is_rate(self) -> bool:
@@ -71,7 +63,7 @@ class ParameterType(enum.Enum):
         }
 
 
-class ParameterTransformation(enum.Enum):
+class ParameterTransformation(StrEnum):
     """
     Flags denoting transformations to be applied on parameters.
 
@@ -123,12 +115,6 @@ class ParameterTransformation(enum.Enum):
     envelope_enforce_two_sided = "envelope_enforce_two_sided"
     flip_smaller_if_one_sided = "flip_smaller_if_one_sided"
     flip_larger_if_one_sided = "flip_larger_if_one_sided"
-
-    def __repr__(self) -> str:
-        return f"<{self.__class__.__name__}.{self.value}>"
-
-    def __str__(self) -> str:
-        return self.value
 
     @property
     def from_shape(self) -> bool:
@@ -199,7 +185,7 @@ class ParameterTransformations(tuple):
         return any(t.from_rate for t in self)
 
 
-class FlowStrategy(enum.Enum):
+class FlowStrategy(StrEnum):
     """
     Strategy to handle over- and underflow bin contents.
 
@@ -214,14 +200,11 @@ class FlowStrategy(enum.Enum):
     remove = "remove"
     move = "move"
 
-    def __str__(self) -> str:
-        return self.value
-
 
 class InferenceModelMeta(CachedDerivableMeta):
 
     def _get_inst_cache_key(cls, args: tuple, kwargs: dict) -> Hashable:
-        config_insts = args[0]
+        config_insts = args[0] if args else kwargs.get("config_insts", [])
         config_names = tuple(sorted(config_inst.name for config_inst in config_insts))
         return freeze((cls, config_names, kwargs.get("inst_dict", {})))
 
@@ -258,6 +241,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
                     mc_datasets: [hh_ggf]
                 scale: 1.0
                 is_dynamic: False
+                skip_if_empty: True
                 parameters:
                   - name: lumi
                     type: rate_gauss
@@ -287,6 +271,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
                     mc_datasets: [tt_sl, tt_dl, tt_fh]
                 scale: 1.0
                 is_dynamic: False
+                skip_if_empty: True
                 parameters:
                   - name: lumi
                     type: rate_gauss
@@ -375,10 +360,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
         """
         def decorator(func: Callable) -> Type[T]:
             # create the class dict
-            cls_dict = {
-                **kwargs,
-                "init_func": func,
-            }
+            cls_dict = {**kwargs, "init_func": func}
 
             # create the subclass
             subclass = cls.derive(func.__name__, bases=bases, cls_dict=cls_dict)
@@ -466,6 +448,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
         config_data: dict[str, DotDict] | None = None,
         scale: float | int = 1.0,
         is_dynamic: bool = False,
+        skip_if_empty: bool = True,
     ) -> DotDict:
         """
         Returns a dictionary representing a process, forwarding all arguments.
@@ -477,6 +460,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
         :param scale: A float value to scale the process, defaulting to 1.0.
         :param is_dynamic: A boolean flag deciding whether this process is dynamic, i.e., whether it is created
             on-the-fly.
+        :param skip_if_empty: A boolean flag deciding whether this process should be skipped if input hists are empty.
         :returns: A dictionary representing the process.
         """
         return DotDict([
@@ -489,6 +473,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
             )),
             ("scale", float(scale)),
             ("is_dynamic", bool(is_dynamic)),
+            ("skip_if_empty", bool(skip_if_empty)),
             ("parameters", []),
         ])
 
@@ -555,7 +540,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
         data_datasets: Sequence[str] | None = None,
     ) -> DotDict:
         """
-        Returns a dictionary representing configuration specific data, forwarding all arguments.
+        Returns a dictionary representing configuration specific data for a category, forwarding all arguments.
 
         :param category: The name of the source category in the config to use.
         :param variable: The name of the variable in the config to use.
@@ -575,7 +560,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
         mc_datasets: Sequence[str] | None = None,
     ) -> DotDict:
         """
-        Returns a dictionary representing configuration specific data, forwarding all arguments.
+        Returns a dictionary representing configuration specific data for a process, forwarding all arguments.
 
         :param process: The name of the process in the config to use.
         :param mc_datasets: List of names or patterns of datasets in the config to use for mc.
@@ -592,7 +577,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
         shift_source: str | None = None,
     ) -> DotDict:
         """
-        Returns a dictionary representing configuration specific data, forwarding all arguments.
+        Returns a dictionary representing configuration specific data for a parameter, forwarding all arguments.
 
         :param shift_source: The name of a systematic shift source in the config.
         :returns: A dictionary representing parameter specific settings.
@@ -601,11 +586,11 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
             ("shift_source", str(shift_source) if shift_source else None),
         ])
 
-    def __init__(self, config_insts: list[od.Config]) -> None:
+    def __init__(self, config_insts: list[od.Config] | None = None) -> None:
         super().__init__()
 
         # store attributes
-        self.config_insts = config_insts
+        self.config_insts = config_insts or []
 
         # temporary attributes for as long as we issue deprecation warnings
         self.__config_inst = None
@@ -704,7 +689,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
         only_name: bool = False,
         match_mode: Callable = any,
         silent: bool = False,
-    ) -> DotDict | str:
+    ) -> DotDict | str | None:
         """
         Returns a single category whose name matches *category*. *category* can be a string, a
         pattern, or sequence of them. An exception is raised if no or more than one category is
@@ -875,7 +860,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
         match_mode: Callable = any,
         category_match_mode: Callable = any,
         silent: bool = False,
-    ) -> DotDict | str:
+    ) -> DotDict | str | None:
         """
         Returns a single process whose name matches *process*, and optionally, whose category's
         name matches *category*. Both *process* and *category* can be a string, a pattern, or
@@ -1153,7 +1138,7 @@ class InferenceModel(Derivable, metaclass=InferenceModelMeta):
         process_match_mode: Callable = any,
         only_name: bool = False,
         silent: bool = False,
-    ) -> DotDict | str:
+    ) -> DotDict | str | None:
         """
         Returns a single parameter whose name matches *parameter*, and optionally, whose category's
         and process' name matches *category* and *process*. All three, *parameter*, *process* and
